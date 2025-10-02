@@ -83,23 +83,23 @@ type Timetag struct {
 // Dispatcher is an interface for an OSC message dispatcher. A dispatcher is
 // responsible for dispatching received OSC messages.
 type Dispatcher interface {
-	Dispatch(packet Packet)
+	Dispatch(packet Packet, address net.Addr)
 }
 
 // Handler is an interface for message handlers. Every handler implementation
 // for an OSC message must implement this interface.
 type Handler interface {
-	HandleMessage(msg *Message)
+	HandleMessage(msg *Message, clientAddress net.Addr)
 }
 
 // HandlerFunc implements the Handler interface. Type definition for an OSC
 // handler function.
-type HandlerFunc func(msg *Message)
+type HandlerFunc func(msg *Message, clientAddress net.Addr)
 
 // HandleMessage calls itself with the given OSC Message. Implements the
 // Handler interface.
-func (f HandlerFunc) HandleMessage(msg *Message) {
-	f(msg)
+func (f HandlerFunc) HandleMessage(msg *Message, clientAddress net.Addr) {
+	f(msg, clientAddress)
 }
 
 ////
@@ -139,7 +139,7 @@ func (s *StandardDispatcher) AddMsgHandler(addr string, handler HandlerFunc) err
 }
 
 // Dispatch dispatches OSC packets. Implements the Dispatcher interface.
-func (s *StandardDispatcher) Dispatch(packet Packet) {
+func (s *StandardDispatcher) Dispatch(packet Packet, clientAddress net.Addr) {
 	switch p := packet.(type) {
 	default:
 		return
@@ -147,11 +147,11 @@ func (s *StandardDispatcher) Dispatch(packet Packet) {
 	case *Message:
 		for addr, handler := range s.handlers {
 			if p.Match(addr) {
-				handler.HandleMessage(p)
+				handler.HandleMessage(p, clientAddress)
 			}
 		}
 		if s.defaultHandler != nil {
-			s.defaultHandler.HandleMessage(p)
+			s.defaultHandler.HandleMessage(p, clientAddress)
 		}
 
 	case *Bundle:
@@ -162,17 +162,17 @@ func (s *StandardDispatcher) Dispatch(packet Packet) {
 			for _, message := range p.Messages {
 				for address, handler := range s.handlers {
 					if message.Match(address) {
-						handler.HandleMessage(message)
+						handler.HandleMessage(message, clientAddress)
 					}
 				}
 				if s.defaultHandler != nil {
-					s.defaultHandler.HandleMessage(message)
+					s.defaultHandler.HandleMessage(message, clientAddress)
 				}
 			}
 
 			// Process all bundles
 			for _, b := range p.Bundles {
-				s.Dispatch(b)
+				s.Dispatch(b, clientAddress)
 			}
 		}()
 	}
@@ -558,7 +558,7 @@ func (s *Server) ListenAndServe() error {
 func (s *Server) Serve(c net.PacketConn) error {
 	var tempDelay time.Duration
 	for {
-		msg, err := s.readFromConnection(c)
+		msg, clientAddr, err := s.readFromConnection(c)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				if tempDelay == 0 {
@@ -575,7 +575,7 @@ func (s *Server) Serve(c net.PacketConn) error {
 			return err
 		}
 		tempDelay = 0
-		go s.Dispatcher.Dispatch(msg)
+		go s.Dispatcher.Dispatch(msg, clientAddr)
 	}
 }
 
@@ -601,29 +601,29 @@ func (s *Server) CloseConnection() error {
 }
 
 // ReceivePacket listens for incoming OSC packets and returns the packet if one is received.
-func (s *Server) ReceivePacket(c net.PacketConn) (Packet, error) {
+func (s *Server) ReceivePacket(c net.PacketConn) (Packet, net.Addr, error) {
 	return s.readFromConnection(c)
 }
 
 // readFromConnection retrieves OSC packets.
-func (s *Server) readFromConnection(c net.PacketConn) (Packet, error) {
+func (s *Server) readFromConnection(c net.PacketConn) (Packet, net.Addr, error) {
 	if s.ReadTimeout != 0 {
 		if err := c.SetReadDeadline(time.Now().Add(s.ReadTimeout)); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	data := make([]byte, 65535)
-	n, _, err := c.ReadFrom(data)
+	n, clientAddr, err := c.ReadFrom(data)
 	if err != nil {
-		return nil, err
+		return nil, clientAddr, err
 	}
 
 	p, err := readPacket(bufio.NewReader(bytes.NewBuffer(data[0:n])))
 	if err != nil {
-		return nil, err
+		return p, clientAddr, err
 	}
-	return p, nil
+	return p, clientAddr, nil
 }
 
 // ParsePacket parses the given msg string and returns a Packet
