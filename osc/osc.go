@@ -524,6 +524,10 @@ func (c *Client) Send(packet Packet) error {
 		return err
 	}
 
+	if c.conn == nil {
+		return fmt.Errorf("no osc connection has been made")
+	}
+
 	if _, err = c.conn.Write(data); err != nil {
 		return err
 	}
