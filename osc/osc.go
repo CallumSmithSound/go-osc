@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"net"
 	"reflect"
 	"regexp"
 	"strings"
@@ -50,24 +49,6 @@ type Bundle struct {
 // Verify that Bundle implements the Packet interface.
 var _ Packet = (*Bundle)(nil)
 
-// Client enables you to send OSC packets. It sends OSC messages and bundles to
-// the given IP address and port.
-type Client struct {
-	ip    string
-	port  int
-	laddr *net.UDPAddr
-	conn  *net.UDPConn
-}
-
-// Server represents an OSC server. The server listens on Address and Port for
-// incoming OSC packets and bundles.
-type Server struct {
-	Addr        string
-	Dispatcher  Dispatcher
-	ReadTimeout time.Duration
-	close       func() error
-}
-
 // Timetag represents an OSC Time Tag.
 // An OSC Time Tag is defined as follows:
 // Time tags are represented by a 64 bit fixed point number. The first 32 bits
@@ -83,22 +64,22 @@ type Timetag struct {
 // Dispatcher is an interface for an OSC message dispatcher. A dispatcher is
 // responsible for dispatching received OSC messages.
 type Dispatcher interface {
-	Dispatch(packet Packet, address net.Addr)
+	Dispatch(packet Packet, address string)
 }
 
 // Handler is an interface for message handlers. Every handler implementation
 // for an OSC message must implement this interface.
 type Handler interface {
-	HandleMessage(msg *Message, clientAddress net.Addr)
+	HandleMessage(msg *Message, clientAddress string)
 }
 
 // HandlerFunc implements the Handler interface. Type definition for an OSC
 // handler function.
-type HandlerFunc func(msg *Message, clientAddress net.Addr)
+type HandlerFunc func(msg *Message, clientAddress string)
 
 // HandleMessage calls itself with the given OSC Message. Implements the
 // Handler interface.
-func (f HandlerFunc) HandleMessage(msg *Message, clientAddress net.Addr) {
+func (f HandlerFunc) HandleMessage(msg *Message, clientAddress string) {
 	f(msg, clientAddress)
 }
 
@@ -139,7 +120,7 @@ func (s *StandardDispatcher) AddMsgHandler(addr string, handler HandlerFunc) err
 }
 
 // Dispatch dispatches OSC packets. Implements the Dispatcher interface.
-func (s *StandardDispatcher) Dispatch(packet Packet, clientAddress net.Addr) {
+func (s *StandardDispatcher) Dispatch(packet Packet, clientAddress string) {
 	switch p := packet.(type) {
 	default:
 		return
@@ -463,171 +444,6 @@ func (b *Bundle) MarshalBinary() ([]byte, error) {
 	}
 
 	return data.Bytes(), nil
-}
-
-////
-// Client
-////
-
-// NewClient creates a new OSC client. The Client is used to send OSC
-// messages and OSC bundles over an UDP network connection. The `ip` argument
-// specifies the IP address and `port` defines the target port where the
-// messages and bundles will be send to.
-func NewClient(ip string, port int) *Client {
-	return &Client{ip: ip, port: port, laddr: nil}
-}
-
-func (c *Client) Connect() error {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", c.ip, c.port))
-	if err != nil {
-		return err
-	}
-
-	c.conn, err = net.DialUDP("udp", c.laddr, addr)
-	if err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (c *Client) Close() error {
-	return c.conn.Close()
-}
-
-// IP returns the IP address.
-func (c *Client) IP() string { return c.ip }
-
-// SetIP sets a new IP address.
-func (c *Client) SetIP(ip string) { c.ip = ip }
-
-// Port returns the port.
-func (c *Client) Port() int { return c.port }
-
-// SetPort sets a new port.
-func (c *Client) SetPort(port int) { c.port = port }
-
-// SetLocalAddr sets the local address.
-func (c *Client) SetLocalAddr(ip string, port int) error {
-	laddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", ip, port))
-	if err != nil {
-		return err
-	}
-	c.laddr = laddr
-	return nil
-}
-
-// Send sends an OSC Bundle or an OSC Message.
-func (c *Client) Send(packet Packet) error {
-	data, err := packet.MarshalBinary()
-	if err != nil {
-		return err
-	}
-
-	if c.conn == nil {
-		return fmt.Errorf("no osc connection has been made")
-	}
-
-	if _, err = c.conn.Write(data); err != nil {
-		return err
-	}
-	return nil
-}
-
-////
-// Server
-////
-
-// ListenAndServe retrieves incoming OSC packets and dispatches the retrieved
-// OSC packets.
-func (s *Server) ListenAndServe() error {
-	defer s.CloseConnection()
-
-	if s.Dispatcher == nil {
-		s.Dispatcher = NewStandardDispatcher()
-	}
-
-	ln, err := net.ListenPacket("udp", s.Addr)
-	if err != nil {
-		return err
-	}
-
-	s.close = ln.Close
-
-	return s.Serve(ln)
-}
-
-// Serve retrieves incoming OSC packets from the given connection and dispatches
-// retrieved OSC packets. If something goes wrong an error is returned.
-func (s *Server) Serve(c net.PacketConn) error {
-	var tempDelay time.Duration
-	for {
-		msg, clientAddr, err := s.readFromConnection(c)
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				if tempDelay == 0 {
-					tempDelay = 5 * time.Millisecond
-				} else {
-					tempDelay *= 2
-				}
-				if max := 1 * time.Second; tempDelay > max {
-					tempDelay = max
-				}
-				time.Sleep(tempDelay)
-				continue
-			}
-			return err
-		}
-		tempDelay = 0
-		go s.Dispatcher.Dispatch(msg, clientAddr)
-	}
-}
-
-// CloseConnection forcibly closes a server's connection.
-//
-// This causes a "use of closed network connection" error the next time the
-// server attempts to read from the connection.
-func (s *Server) CloseConnection() error {
-	if s.close == nil {
-		return nil
-	}
-
-	err := s.close()
-	// If we get "use of closed network connection", it's not a problem because
-	// closing the network connection is exactly what we wanted to do!
-	if err != nil && !strings.Contains(
-		err.Error(), "use of closed network connection",
-	) {
-		return err
-	}
-
-	return nil
-}
-
-// ReceivePacket listens for incoming OSC packets and returns the packet if one is received.
-func (s *Server) ReceivePacket(c net.PacketConn) (Packet, net.Addr, error) {
-	return s.readFromConnection(c)
-}
-
-// readFromConnection retrieves OSC packets.
-func (s *Server) readFromConnection(c net.PacketConn) (Packet, net.Addr, error) {
-	if s.ReadTimeout != 0 {
-		if err := c.SetReadDeadline(time.Now().Add(s.ReadTimeout)); err != nil {
-			return nil, nil, err
-		}
-	}
-
-	data := make([]byte, 65535)
-	n, clientAddr, err := c.ReadFrom(data)
-	if err != nil {
-		return nil, clientAddr, err
-	}
-
-	p, err := readPacket(bufio.NewReader(bytes.NewBuffer(data[0:n])))
-	if err != nil {
-		return p, clientAddr, err
-	}
-	return p, clientAddr, nil
 }
 
 // ParsePacket parses the given msg string and returns a Packet
