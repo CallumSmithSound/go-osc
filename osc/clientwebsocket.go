@@ -3,7 +3,6 @@ package osc
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"net/url"
 	"time"
@@ -30,7 +29,6 @@ func NewWebClient(host string, path string) *WebClient {
 
 func (c *WebClient) Connect() error {
 	u := url.URL{Scheme: "ws", Host: c.host, Path: c.path}
-	log.Printf("connecting to %s", u.String())
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
